@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: nexmeet-backend
+    restart: always
+    ports:
+      - "4000:4000" # Exposes your backend on Port 4000
+    environment:
+      # Server Configuration
+      - PORT=4000
+
+      # Supabase Configuration
+      - SUPABASE_URL=https://wcrkufjrqpqxicswfdmp.supabase.co
+      - SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indjcmt1ZmpycXBxeGljc3dmZG1wIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3MzE2NjMsImV4cCI6MjA3OTMwNzY2M30.escxedCBUTSI-ZGXmW3mkokPL_rVQh8KAgUs02p6PRg
+
+      # LiveKit Configuration
+      - LIVEKIT_URL=wss://nexmeet-i6jtqeez.livekit.cloud
+      - LIVEKIT_API_KEY=API23Z39Hpm9pHa
+      - LIVEKIT_API_SECRET=aWPC8rkrce79Ff4kNznidtiu14XhgeRSapNv0cNhlKRB
+
+      # Node Environment
+      - NODE_ENV=production
+
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    networks:
+      - nexmeet-network
+
+networks:
+  nexmeet-network:
+    driver: bridge
