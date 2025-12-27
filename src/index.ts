@@ -9,6 +9,10 @@ import { startRecording, stopRecording, getRecordings, egressWebhook } from './c
 
 const app = express();
 
+// Trust proxy - Required when behind Nginx/Caddy reverse proxy
+// This fixes the "X-Forwarded-For" rate limiting error
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
 
