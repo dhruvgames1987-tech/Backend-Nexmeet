@@ -25,14 +25,19 @@ const globalLimiter = rateLimit({
     legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
 
-// Strict rate limit for login: 5 attempts per 15 minutes per IP
+// Strict rate limit for login: 5 attempts per 15 minutes per USERNAME (not IP!)
 const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // Only 5 login attempts per IP
+    max: 10, // 10 login attempts per username
     message: { error: 'Too many login attempts. Please try again in 15 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
-    skipSuccessfulRequests: false, // Count all attempts, even successful ones
+    skipSuccessfulRequests: true, // Only count failed attempts
+    keyGenerator: (req) => {
+        // Rate limit by username instead of IP
+        // This prevents one user from locking out everyone
+        return req.body?.username || req.ip;
+    },
 });
 
 // Strict rate limit for password change: 3 attempts per hour
