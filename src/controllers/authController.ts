@@ -14,11 +14,20 @@ export const login = async (req: Request, res: Response) => {
             .single();
 
         if (error || !user) {
+            console.log('User not found:', username, 'Error:', error?.message);
             return res.status(401).json({ error: 'Invalid credentials' });
         }
 
         // 2. Validate password
         // Note: In production, you should use bcrypt or similar for hashed passwords
+        console.log('Password check for user:', username, {
+            dbPasswordLength: user.password?.length,
+            inputPasswordLength: password?.length,
+            dbPassword: `[${user.password}]`,
+            inputPassword: `[${password}]`,
+            match: user.password === password
+        });
+
         if (user.password !== password) {
             console.log('Password mismatch for user:', username);
             return res.status(401).json({ error: 'Invalid credentials' });
