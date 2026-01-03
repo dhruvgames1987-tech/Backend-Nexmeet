@@ -56,11 +56,28 @@ export const login = async (req: Request, res: Response) => {
             // We'll store this device ID below
         }
 
+        // 3.5. Stale Session Cleanup (Prevention for "Ghost" Users)
+        // If this device was previously used by another user who didn't logout properly,
+        // force that previous session to end now.
+        if (deviceId) {
+            console.log('Run stale session cleanup for device:', deviceId);
+            const { error: cleanupError } = await supabase
+                .from('users')
+                .update({ is_online: false })
+                .eq('device_id', deviceId)
+                .neq('id', user.id) // Don't touch the current user (we update them next)
+                .eq('is_online', true); // Only target users who are still marked online
+
+            if (cleanupError) {
+                console.warn('Warning: Failed to clean up stale sessions:', cleanupError.message);
+            }
+        }
+
         // 4. Update User Status & Device Info
         const updates: any = {
-            status: 'active',
-            is_online: true,
-            device_name: deviceName || user.device_name || 'Unknown'
+            status: 'active', // Ensure status is active
+            is_online: true,  // Mark as online
+            device_name: deviceName || user.device_name || 'Unknown' // Update device name if provided
         };
 
         // Always update device_id if it's different or not set
