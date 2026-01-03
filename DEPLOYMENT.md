@@ -135,9 +135,9 @@ Add this content:
 PORT=4000
 SUPABASE_URL=https://wcrkufjrqpqxicswfdmp.supabase.co
 SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Indjcmt1ZmpycXBxeGljc3dmZG1wIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3MzE2NjMsImV4cCI6MjA3OTMwNzY2M30.escxedCBUTSI-ZGXmW3mkokPL_rVQh8KAgUs02p6PRg
-LIVEKIT_URL=wss://nexmeet-i6jtqeez.livekit.cloud
-LIVEKIT_API_KEY=API23Z39Hpm9pHa
-LIVEKIT_API_SECRET=aWPC8rkrce79Ff4kNznidtiu14XhgeRSapNv0cNhlKRB
+LIVEKIT_URL=wss://meet.dhruvmusic.co.in
+LIVEKIT_API_KEY=API4LbQuKxrMYqb
+LIVEKIT_API_SECRET=zNdCm0ytVSeZ1tZOG5xbQ7GdKV3SnnEnz49zCROkopE
 NODE_ENV=production
 ```
 
