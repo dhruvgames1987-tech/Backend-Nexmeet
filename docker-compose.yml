@@ -17,8 +17,8 @@ services:
 
       # LiveKit Configuration (Self-Hosted Server)
       - LIVEKIT_URL=wss://meet.dhruvmusic.co.in
-      - LIVEKIT_API_KEY=API4LbQuKxrMYqb
-      - LIVEKIT_API_SECRET=zNdCm0ytVSeZ1tZOG5xbQ7GdKV3SnnEnz49zCROkopE
+      - LIVEKIT_API_KEY=API7WqCVx9rkQkz
+      - LIVEKIT_API_SECRET=IbTYek4jWAloseo8e0cGJVXmslPY5JdKl3l5NukKDAOB
 
       # Node Environment
       - NODE_ENV=production
