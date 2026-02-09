@@ -1,7 +1,25 @@
 import { Request, Response } from 'express';
-import { EgressClient, EncodedFileOutput, EncodedFileType } from 'livekit-server-sdk';
+import { EgressClient, EncodedFileOutput, EncodedFileType, DirectFileOutput } from 'livekit-server-sdk';
 import { config } from '../config';
 import { supabase } from '../supabaseClient';
+import fs from 'fs';
+import path from 'path';
+
+// Define file type inline to work with or without @types/multer
+interface UploadedFile {
+    fieldname: string;
+    originalname: string;
+    encoding: string;
+    mimetype: string;
+    size: number;
+    destination: string;
+    filename: string;
+    path: string;
+}
+
+interface MulterRequest extends Request {
+    file?: UploadedFile;
+}
 
 const egressClient = new EgressClient(
     config.livekit.wsUrl,
@@ -9,8 +27,27 @@ const egressClient = new EgressClient(
     config.livekit.apiSecret
 );
 
-// Start recording a room
-export const startRecording = async (req: Request, res: Response) => {
+// Ensure recordings directory exists
+const ensureRecordingsDir = () => {
+    const recordingsPath = config.recordings.storagePath;
+    if (!fs.existsSync(recordingsPath)) {
+        fs.mkdirSync(recordingsPath, { recursive: true });
+    }
+    // Create subdirectories for different types
+    const sessionDir = path.join(recordingsPath, 'sessions');
+    const clipsDir = path.join(recordingsPath, 'clips');
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+    if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true });
+};
+
+// Initialize directory on module load
+ensureRecordingsDir();
+
+/**
+ * Start recording an entire room session (Admin only)
+ * Uses LiveKit Egress for server-side composite recording
+ */
+export const startSessionRecording = async (req: Request, res: Response) => {
     const { roomName, username } = req.body;
 
     if (!roomName) {
@@ -18,25 +55,24 @@ export const startRecording = async (req: Request, res: Response) => {
     }
 
     try {
-        // Configure output - saves to S3 or local storage
-        const fileOutput: EncodedFileOutput = {
-            fileType: EncodedFileType.MP4,
-            filepath: `recordings/${roomName}/${Date.now()}.mp4`,
-            // For S3:
-            // s3: {
-            //     accessKey: process.env.S3_ACCESS_KEY,
-            //     secret: process.env.S3_SECRET,
-            //     bucket: process.env.S3_BUCKET,
-            //     region: process.env.S3_REGION,
-            // }
+        // Calculate expiration date
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + config.recordings.retentionDays);
+
+        const timestamp = Date.now();
+        const filename = `session_${roomName}_${timestamp}.ogg`;
+
+        // Configure output for direct file (audio only, more efficient)
+        const fileOutput: DirectFileOutput = {
+            filepath: `/out/sessions/${filename}`,
         };
 
-        // Start room composite egress (records all audio/video in room)
+        // Start room composite egress (records all audio in room)
         const egressInfo = await egressClient.startRoomCompositeEgress(
             roomName,
-            { file: fileOutput },
+            { file: { fileType: EncodedFileType.OGG, filepath: `/out/sessions/${filename}` } },
             {
-                audioOnly: true, // For walkie-talkie, we only need audio
+                audioOnly: true,
             }
         );
 
@@ -47,7 +83,10 @@ export const startRecording = async (req: Request, res: Response) => {
                 room_name: roomName,
                 egress_id: egressInfo.egressId,
                 status: 'recording',
-                created_by: username
+                recording_type: 'admin_session',
+                created_by: username,
+                started_at: new Date().toISOString(),
+                expires_at: expiresAt.toISOString(),
             })
             .select()
             .single();
@@ -55,18 +94,20 @@ export const startRecording = async (req: Request, res: Response) => {
         if (error) throw error;
 
         return res.json({
-            message: 'Recording started',
+            message: 'Session recording started',
             egressId: egressInfo.egressId,
             recording: data
         });
     } catch (err) {
-        console.error('Start recording error:', err);
-        return res.status(500).json({ error: 'Failed to start recording' });
+        console.error('Start session recording error:', err);
+        return res.status(500).json({ error: 'Failed to start session recording' });
     }
 };
 
-// Stop a recording
-export const stopRecording = async (req: Request, res: Response) => {
+/**
+ * Stop a session recording
+ */
+export const stopSessionRecording = async (req: Request, res: Response) => {
     const { egressId } = req.body;
 
     if (!egressId) {
@@ -82,25 +123,139 @@ export const stopRecording = async (req: Request, res: Response) => {
             .update({
                 status: 'completed',
                 ended_at: new Date().toISOString(),
-                // file_url would be updated via webhook when file is ready
             })
             .eq('egress_id', egressId);
 
-        return res.json({ message: 'Recording stopped', egressInfo });
+        return res.json({ message: 'Session recording stopped', egressInfo });
     } catch (err) {
-        console.error('Stop recording error:', err);
-        return res.status(500).json({ error: 'Failed to stop recording' });
+        console.error('Stop session recording error:', err);
+        return res.status(500).json({ error: 'Failed to stop session recording' });
     }
 };
 
-// Get all recordings (optionally filter by room)
-export const getRecordings = async (req: Request, res: Response) => {
+/**
+ * Upload a user audio clip (from mobile app client-side recording)
+ */
+export const uploadUserClip = async (req: MulterRequest, res: Response) => {
+    const { username, roomName, duration } = req.body;
+    const file = req.file;
+
+    if (!file) {
+        return res.status(400).json({ error: 'Audio file is required' });
+    }
+
+    if (!username) {
+        return res.status(400).json({ error: 'Username is required' });
+    }
+
+    try {
+        // Get user ID from username
+        const { data: userData, error: userError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('username', username)
+            .single();
+
+        if (userError || !userData) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Calculate expiration date
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + config.recordings.retentionDays);
+
+        const timestamp = Date.now();
+        const ext = path.extname(file.originalname) || '.m4a';
+        const filename = `clip_${username}_${timestamp}${ext}`;
+        const filePath = path.join(config.recordings.storagePath, 'clips', filename);
+
+        // Move file to clips directory
+        fs.renameSync(file.path, filePath);
+
+        // Get file size
+        const stats = fs.statSync(filePath);
+
+        // Save to database
+        const { data, error } = await supabase
+            .from('recordings')
+            .insert({
+                room_name: roomName || 'unknown',
+                file_url: `/recordings/clips/${filename}`,
+                status: 'completed',
+                recording_type: 'user_clip',
+                user_id: userData.id,
+                created_by: username,
+                duration: parseInt(duration) || 0,
+                file_size: stats.size,
+                started_at: new Date().toISOString(),
+                ended_at: new Date().toISOString(),
+                expires_at: expiresAt.toISOString(),
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        return res.json({
+            message: 'User clip uploaded successfully',
+            recording: data
+        });
+    } catch (err) {
+        console.error('Upload user clip error:', err);
+        return res.status(500).json({ error: 'Failed to upload user clip' });
+    }
+};
+
+/**
+ * Get recordings for a specific user (their own clips)
+ */
+export const getUserRecordings = async (req: Request, res: Response) => {
+    const { username } = req.query;
+
+    if (!username) {
+        return res.status(400).json({ error: 'Username is required' });
+    }
+
+    try {
+        // Get user ID
+        const { data: userData, error: userError } = await supabase
+            .from('users')
+            .select('id')
+            .eq('username', username)
+            .single();
+
+        if (userError || !userData) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const { data, error } = await supabase
+            .from('recordings')
+            .select('*')
+            .eq('user_id', userData.id)
+            .eq('recording_type', 'user_clip')
+            .eq('status', 'completed')
+            .order('started_at', { ascending: false });
+
+        if (error) throw error;
+
+        return res.json(data || []);
+    } catch (err) {
+        console.error('Get user recordings error:', err);
+        return res.status(500).json({ error: 'Failed to fetch user recordings' });
+    }
+};
+
+/**
+ * Get all session recordings (Admin only)
+ */
+export const getSessionRecordings = async (req: Request, res: Response) => {
     const { roomName } = req.query;
 
     try {
         let query = supabase
             .from('recordings')
             .select('*')
+            .eq('recording_type', 'admin_session')
             .eq('status', 'completed')
             .order('started_at', { ascending: false });
 
@@ -114,28 +269,72 @@ export const getRecordings = async (req: Request, res: Response) => {
 
         return res.json(data || []);
     } catch (err) {
+        console.error('Get session recordings error:', err);
+        return res.status(500).json({ error: 'Failed to fetch session recordings' });
+    }
+};
+
+/**
+ * Get all recordings (for backwards compatibility)
+ */
+export const getRecordings = async (req: Request, res: Response) => {
+    const { roomName, type } = req.query;
+
+    try {
+        let query = supabase
+            .from('recordings')
+            .select('*')
+            .eq('status', 'completed')
+            .order('started_at', { ascending: false });
+
+        if (roomName) {
+            query = query.eq('room_name', roomName);
+        }
+
+        if (type) {
+            query = query.eq('recording_type', type);
+        }
+
+        const { data, error } = await query;
+
+        if (error) throw error;
+
+        return res.json(data || []);
+    } catch (err) {
         console.error('Get recordings error:', err);
         return res.status(500).json({ error: 'Failed to fetch recordings' });
     }
 };
 
-// Webhook handler for LiveKit egress events
+/**
+ * Legacy: Start recording (keeping for backwards compatibility)
+ */
+export const startRecording = startSessionRecording;
+
+/**
+ * Legacy: Stop recording (keeping for backwards compatibility)
+ */
+export const stopRecording = stopSessionRecording;
+
+/**
+ * Webhook handler for LiveKit egress events
+ */
 export const egressWebhook = async (req: Request, res: Response) => {
-    // LiveKit sends webhook when egress completes
     const { event, egressInfo } = req.body;
 
     console.log('Egress webhook received:', event);
 
     if (event === 'egress_ended') {
-        // Update recording with final file URL
-        const fileUrl = egressInfo?.fileResults?.[0]?.location || '';
-        const duration = Math.floor((egressInfo?.updatedAt - egressInfo?.startedAt) / 1000000000);
+        // Extract filename from egress info
+        const fileUrl = egressInfo?.fileResults?.[0]?.filename || '';
+        const duration = Math.floor((egressInfo?.endedAt - egressInfo?.startedAt) / 1000000000);
 
+        // Update recording with final file URL and duration
         await supabase
             .from('recordings')
             .update({
                 status: 'completed',
-                file_url: fileUrl,
+                file_url: `/recordings/sessions/${path.basename(fileUrl)}`,
                 duration: duration,
                 ended_at: new Date().toISOString()
             })
