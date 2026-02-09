@@ -17,9 +17,10 @@ interface UploadedFile {
     path: string;
 }
 
-interface MulterRequest extends Request {
+// Use type alias with Omit to avoid conflict with Express's built-in file type
+type MulterRequest = Omit<Request, 'file'> & {
     file?: UploadedFile;
-}
+};
 
 const egressClient = new EgressClient(
     config.livekit.wsUrl,
