@@ -118,16 +118,32 @@ export const stopSessionRecording = async (req: Request, res: Response) => {
     try {
         const egressInfo = await egressClient.stopEgress(egressId);
 
-        // Update database
+        // First, get the recording to calculate duration
+        const { data: existingRecording } = await supabase
+            .from('recordings')
+            .select('started_at')
+            .eq('egress_id', egressId)
+            .single();
+
+        const endedAt = new Date();
+        let duration = 0;
+
+        if (existingRecording?.started_at) {
+            const startedAt = new Date(existingRecording.started_at);
+            duration = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
+        }
+
+        // Update database with duration calculation
         await supabase
             .from('recordings')
             .update({
                 status: 'completed',
-                ended_at: new Date().toISOString(),
+                ended_at: endedAt.toISOString(),
+                duration: duration,
             })
             .eq('egress_id', egressId);
 
-        return res.json({ message: 'Session recording stopped', egressInfo });
+        return res.json({ message: 'Session recording stopped', duration, egressInfo });
     } catch (err) {
         console.error('Stop session recording error:', err);
         return res.status(500).json({ error: 'Failed to stop session recording' });
