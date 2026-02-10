@@ -86,7 +86,7 @@ app.use(globalLimiter);
 
 // Health check endpoints
 app.get('/', (req, res) => {
-    res.send('NexMeet Backend is running');
+    res.send('D Telecom Backend is running');
 });
 
 app.get('/health', (req, res) => {
