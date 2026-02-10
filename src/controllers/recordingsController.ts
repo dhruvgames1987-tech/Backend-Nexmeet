@@ -63,26 +63,30 @@ export const startSessionRecording = async (req: Request, res: Response) => {
         const timestamp = Date.now();
         const filename = `session_${roomName}_${timestamp}.ogg`;
 
-        // Configure output for direct file (audio only, more efficient)
-        const fileOutput: DirectFileOutput = {
-            filepath: `/out/sessions/${filename}`,
-        };
+        // Egress saves to this path inside the egress container.
+        // This path should be a Docker volume shared with the backend container
+        // so it maps to /app/recordings/sessions/<filename> on the backend
+        const egressFilePath = `/recordings/sessions/${filename}`;
 
         // Start room composite egress (records all audio in room)
         const egressInfo = await egressClient.startRoomCompositeEgress(
             roomName,
-            { file: { fileType: EncodedFileType.OGG, filepath: `/out/sessions/${filename}` } },
+            { file: { fileType: EncodedFileType.OGG, filepath: egressFilePath } },
             {
                 audioOnly: true,
             }
         );
 
-        // Save to database
+        // The URL that the backend will serve this file at
+        const fileUrl = `/recordings/sessions/${filename}`;
+
+        // Save to database - include the expected file_url immediately
         const { data, error } = await supabase
             .from('recordings')
             .insert({
                 room_name: roomName,
                 egress_id: egressInfo.egressId,
+                file_url: fileUrl,
                 status: 'recording',
                 recording_type: 'admin_session',
                 created_by: username,
@@ -93,6 +97,8 @@ export const startSessionRecording = async (req: Request, res: Response) => {
             .single();
 
         if (error) throw error;
+
+        console.log(`Recording started: egress=${egressInfo.egressId}, file=${egressFilePath}`);
 
         return res.json({
             message: 'Session recording started',
@@ -118,10 +124,10 @@ export const stopSessionRecording = async (req: Request, res: Response) => {
     try {
         const egressInfo = await egressClient.stopEgress(egressId);
 
-        // First, get the recording to calculate duration
+        // First, get the recording to calculate duration and file info
         const { data: existingRecording } = await supabase
             .from('recordings')
-            .select('started_at')
+            .select('started_at, room_name, file_url')
             .eq('egress_id', egressId)
             .single();
 
@@ -133,17 +139,37 @@ export const stopSessionRecording = async (req: Request, res: Response) => {
             duration = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
         }
 
-        // Update database with duration calculation
+        // Try to get the file URL from the egress response
+        let fileUrl = existingRecording?.file_url || null;
+        try {
+            // The egress info contains file results after stopping
+            const fileResults = (egressInfo as any)?.fileResults || (egressInfo as any)?.file?.filename;
+            if (fileResults) {
+                const egressFilename = typeof fileResults === 'string'
+                    ? path.basename(fileResults)
+                    : path.basename(fileResults[0]?.filename || '');
+                if (egressFilename) {
+                    fileUrl = `/recordings/sessions/${egressFilename}`;
+                }
+            }
+        } catch (e) {
+            console.log('Could not extract filename from egress info, using pre-saved URL');
+        }
+
+        // Update database with duration and file URL
         await supabase
             .from('recordings')
             .update({
                 status: 'completed',
                 ended_at: endedAt.toISOString(),
                 duration: duration,
+                file_url: fileUrl,
             })
             .eq('egress_id', egressId);
 
-        return res.json({ message: 'Session recording stopped', duration, egressInfo });
+        console.log(`Recording stopped: egress=${egressId}, duration=${duration}s, file_url=${fileUrl}`);
+
+        return res.json({ message: 'Session recording stopped', duration, fileUrl, egressInfo });
     } catch (err) {
         console.error('Stop session recording error:', err);
         return res.status(500).json({ error: 'Failed to stop session recording' });
