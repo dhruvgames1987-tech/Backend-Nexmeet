@@ -290,9 +290,10 @@ export const getUserRecordings = async (req: Request, res: Response) => {
 
 /**
  * Get all session recordings (Admin only)
+ * Supports optional filters: roomName, createdBy
  */
 export const getSessionRecordings = async (req: Request, res: Response) => {
-    const { roomName } = req.query;
+    const { roomName, createdBy } = req.query;
 
     try {
         let query = supabase
@@ -306,6 +307,10 @@ export const getSessionRecordings = async (req: Request, res: Response) => {
             query = query.eq('room_name', roomName);
         }
 
+        if (createdBy) {
+            query = query.eq('created_by', createdBy);
+        }
+
         const { data, error } = await query;
 
         if (error) throw error;
@@ -314,6 +319,40 @@ export const getSessionRecordings = async (req: Request, res: Response) => {
     } catch (err) {
         console.error('Get session recordings error:', err);
         return res.status(500).json({ error: 'Failed to fetch session recordings' });
+    }
+};
+
+/**
+ * Get all recordings for a specific user (their own clips + their session recordings)
+ * This is used by the mobile app so each user only sees their own recordings
+ */
+export const getMyRecordings = async (req: Request, res: Response) => {
+    const { username, roomName } = req.query;
+
+    if (!username) {
+        return res.status(400).json({ error: 'Username is required' });
+    }
+
+    try {
+        let query = supabase
+            .from('recordings')
+            .select('*')
+            .eq('created_by', username)
+            .eq('status', 'completed')
+            .order('started_at', { ascending: false });
+
+        if (roomName) {
+            query = query.eq('room_name', roomName);
+        }
+
+        const { data, error } = await query;
+
+        if (error) throw error;
+
+        return res.json(data || []);
+    } catch (err) {
+        console.error('Get my recordings error:', err);
+        return res.status(500).json({ error: 'Failed to fetch recordings' });
     }
 };
 

@@ -13,6 +13,7 @@ import {
     uploadUserClip,
     getUserRecordings,
     getSessionRecordings,
+    getMyRecordings,
     getRecordings,
     egressWebhook,
     // Legacy aliases
@@ -114,6 +115,7 @@ app.get('/session-recordings', getSessionRecordings);
 // Recording routes - User clips
 app.post('/upload-clip', upload.single('audio'), uploadUserClip);
 app.get('/user-recordings', getUserRecordings);
+app.get('/my-recordings', getMyRecordings);
 
 // Recording routes - All recordings
 app.get('/recordings', getRecordings);
