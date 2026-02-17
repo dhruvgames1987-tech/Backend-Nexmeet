@@ -58,11 +58,11 @@ const globalLimiter = rateLimit({
     legacyHeaders: false,
 });
 
-// Strict rate limit for login: 10 attempts per 15 minutes per USERNAME
+// Strict rate limit for login: 30 attempts per 5 minutes per USERNAME
 const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 10,
-    message: { error: 'Too many login attempts. Please try again in 15 minutes.' },
+    windowMs: 5 * 60 * 1000,
+    max: 30,
+    message: { error: 'Too many login attempts. Please try again in 5 minutes.' },
     standardHeaders: true,
     legacyHeaders: false,
     skipSuccessfulRequests: true,
@@ -138,7 +138,7 @@ app.post('/trigger-cleanup', async (req, res) => {
 // ==========================================
 app.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);
-    console.log('Rate limiting enabled: 100 req/15min global, 10 login attempts/15min');
+    console.log('Rate limiting enabled: 100 req/15min global, 30 login attempts/5min');
     console.log(`Recordings storage: ${config.recordings.storagePath}`);
     console.log(`Recordings retention: ${config.recordings.retentionDays} days`);
 
