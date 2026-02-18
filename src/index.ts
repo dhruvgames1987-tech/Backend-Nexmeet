@@ -10,6 +10,8 @@ import { generateToken, muteAllParticipants, unmuteAllParticipants, logoutAllPar
 import {
     startSessionRecording,
     stopSessionRecording,
+    startUserClipRecording,
+    stopUserClipRecording,
     uploadUserClip,
     getUserRecordings,
     getSessionRecordings,
@@ -113,6 +115,8 @@ app.post('/stop-session-recording', stopSessionRecording);
 app.get('/session-recordings', getSessionRecordings);
 
 // Recording routes - User clips
+app.post('/start-user-clip-recording', startUserClipRecording);
+app.post('/stop-user-clip-recording', stopUserClipRecording);
 app.post('/upload-clip', upload.single('audio'), uploadUserClip);
 app.get('/user-recordings', getUserRecordings);
 app.get('/my-recordings', getMyRecordings);
