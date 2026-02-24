@@ -9,59 +9,205 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.login = void 0;
+exports.getOnlineUsers = exports.logout = exports.changePassword = exports.login = void 0;
 const supabaseClient_1 = require("../supabaseClient");
+const livekit_1 = require("../utils/livekit");
 const login = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const { username, deviceId } = req.body;
-    if (!username || !deviceId) {
-        return res.status(400).json({ error: 'Username and Device ID are required' });
-    }
+    var _a;
     try {
-        // 1. Fetch user
+        const { username, password, deviceId, deviceName } = req.body;
+        // 1. Check if user exists
         const { data: user, error } = yield supabaseClient_1.supabase
             .from('users')
             .select('*')
             .eq('username', username)
             .single();
         if (error || !user) {
-            return res.status(404).json({ error: 'User not found' });
+            console.log('User not found:', username, 'Error:', error === null || error === void 0 ? void 0 : error.message);
+            return res.status(401).json({ error: 'Invalid credentials' });
         }
-        if (user.status === 'disabled') {
-            return res.status(403).json({ error: 'Account is disabled' });
+        // 2. Validate password
+        // Note: In production, you should use bcrypt or similar for hashed passwords
+        console.log('Password check for user:', username, {
+            dbPasswordLength: (_a = user.password) === null || _a === void 0 ? void 0 : _a.length,
+            inputPasswordLength: password === null || password === void 0 ? void 0 : password.length,
+            dbPassword: `[${user.password}]`,
+            inputPassword: `[${password}]`,
+            match: user.password === password
+        });
+        if (user.password !== password) {
+            console.log('Password mismatch for user:', username);
+            return res.status(401).json({ error: 'Invalid credentials' });
         }
-        // 2. Device Locking Logic
-        if (!user.device_id) {
-            // First time login, lock to this device
-            const { error: updateError } = yield supabaseClient_1.supabase
+        // 3. Device Lock Check
+        console.log('Device Lock Check:', {
+            username,
+            deviceLockEnabled: user.device_lock,
+            storedDeviceId: user.device_id,
+            incomingDeviceId: deviceId,
+            match: user.device_id === deviceId
+        });
+        // If device lock is enabled
+        if (user.device_lock) {
+            // If there's a stored device ID, it must match the incoming one
+            if (user.device_id && user.device_id !== deviceId) {
+                console.log('Device lock violation: Different device attempting login');
+                return res.status(403).json({
+                    error: 'Device Locked. You cannot log in from a new device.',
+                    details: 'This account is locked to a specific device. Contact admin to unlock.'
+                });
+            }
+            // If no device ID is stored yet, this is the first login with lock enabled
+            // We'll store this device ID below
+        }
+        // 3.5. Stale Session Cleanup (Prevention for "Ghost" Users)
+        // If this device was previously used by another user who didn't logout properly,
+        // force that previous session to end now.
+        if (deviceId) {
+            console.log('Run stale session cleanup for device:', deviceId);
+            const { error: cleanupError } = yield supabaseClient_1.supabase
                 .from('users')
-                .update({ device_id: deviceId, is_online: true })
-                .eq('id', user.id);
-            if (updateError) {
-                return res.status(500).json({ error: 'Failed to lock device' });
+                .update({ is_online: false })
+                .eq('device_id', deviceId)
+                .neq('id', user.id) // Don't touch the current user (we update them next)
+                .eq('is_online', true); // Only target users who are still marked online
+            if (cleanupError) {
+                console.warn('Warning: Failed to clean up stale sessions:', cleanupError.message);
             }
         }
-        else if (user.device_id !== deviceId) {
-            // Device mismatch
-            return res.status(403).json({ error: 'Device mismatch. Login from authorized device only.' });
+        // 4. Update User Status & Device Info
+        const updates = {
+            status: 'active', // Ensure status is active
+            is_online: true, // Mark as online
+            device_name: deviceName || user.device_name || 'Unknown' // Update device name if provided
+        };
+        // Always update device_id if it's different or not set
+        if (user.device_id !== deviceId) {
+            updates.device_id = deviceId;
+            console.log('Updating device_id to:', deviceId);
+        }
+        yield supabaseClient_1.supabase
+            .from('users')
+            .update(updates)
+            .eq('id', user.id);
+        // 5. Generate Token based on user's assigned room
+        let roomName = 'General Assembly'; // Default fallback if no room assigned
+        if (user.current_room_id) {
+            const { data: room, error: roomError } = yield supabaseClient_1.supabase
+                .from('rooms')
+                .select('name')
+                .eq('id', user.current_room_id)
+                .single();
+            if (room && !roomError) {
+                roomName = room.name;
+                console.log(`User ${username} joining room: ${roomName} (ID: ${user.current_room_id})`);
+            }
+            else {
+                console.log(`Room not found for user ${username}, using default room`);
+            }
         }
         else {
-            // Update online status
-            yield supabaseClient_1.supabase.from('users').update({ is_online: true }).eq('id', user.id);
+            console.log(`No room assigned to user ${username}, using default room`);
         }
-        // 3. Success
-        return res.json({
-            message: 'Login successful',
+        const token = yield (0, livekit_1.createLiveKitToken)(username, roomName);
+        // 6. Return Response
+        res.json({
+            token,
             user: {
                 id: user.id,
                 username: user.username,
+                full_name: user.full_name,
                 role: user.role,
-                full_name: user.full_name
-            }
+                current_room_id: user.current_room_id,
+                device_lock: user.device_lock
+            },
+            roomName
         });
     }
-    catch (err) {
-        console.error('Login error:', err);
-        return res.status(500).json({ error: 'Internal server error' });
+    catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 exports.login = login;
+const changePassword = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { username, currentPassword, newPassword } = req.body;
+        if (!username || !currentPassword || !newPassword) {
+            return res.status(400).json({ error: 'Username, current password, and new password are required' });
+        }
+        // 1. Fetch the user to verify current password
+        const { data: user, error: fetchError } = yield supabaseClient_1.supabase
+            .from('users')
+            .select('*')
+            .eq('username', username)
+            .single();
+        if (fetchError || !user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        // 2. Validate current password
+        if (user.password !== currentPassword) {
+            console.log('Current password mismatch for user:', username);
+            return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+        // 3. Update to new password
+        // In a real app, hash the password here!
+        const { error } = yield supabaseClient_1.supabase
+            .from('users')
+            .update({ password: newPassword }) // Storing plain text as per current setup (NOT RECOMMENDED for production)
+            .eq('username', username);
+        if (error) {
+            throw error;
+        }
+        console.log('Password updated successfully for user:', username);
+        res.json({ message: 'Password updated successfully' });
+    }
+    catch (error) {
+        console.error('Change password error:', error);
+        res.status(500).json({ error: 'Failed to update password' });
+    }
+});
+exports.changePassword = changePassword;
+const logout = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { username } = req.body;
+        if (!username) {
+            return res.status(400).json({ error: 'Username is required' });
+        }
+        const { error } = yield supabaseClient_1.supabase
+            .from('users')
+            .update({
+            is_online: false,
+            // NOTE: Do NOT clear current_room_id here - it's the user's permanent room assignment!
+            // Only update their online status
+        })
+            .eq('username', username);
+        if (error) {
+            throw error;
+        }
+        res.json({ message: 'Logged out successfully' });
+    }
+    catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({ error: 'Failed to logout' });
+    }
+});
+exports.logout = logout;
+const getOnlineUsers = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { data: users, error } = yield supabaseClient_1.supabase
+            .from('users')
+            .select('id, username, full_name, status, is_online, device_id, role, current_room_id')
+            .eq('is_online', true)
+            .order('username', { ascending: true });
+        if (error) {
+            throw error;
+        }
+        res.json({ users: users || [] });
+    }
+    catch (error) {
+        console.error('Get online users error:', error);
+        res.status(500).json({ error: 'Failed to fetch online users' });
+    }
+});
+exports.getOnlineUsers = getOnlineUsers;

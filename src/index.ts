@@ -51,10 +51,10 @@ app.use('/recordings', express.static(config.recordings.storagePath));
 // RATE LIMITING - Protect against brute force
 // ==========================================
 
-// Global rate limit: 100 requests per 15 minutes per IP
+// Global rate limit: 5000 requests per 15 minutes per IP (to accommodate app polling)
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100,
+    max: 5000,
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -142,7 +142,7 @@ app.post('/trigger-cleanup', async (req, res) => {
 // ==========================================
 app.listen(config.port, () => {
     console.log(`Server running on port ${config.port}`);
-    console.log('Rate limiting enabled: 100 req/15min global, 30 login attempts/5min');
+    console.log('Rate limiting enabled: 5000 req/15min global, 30 login attempts/5min');
     console.log(`Recordings storage: ${config.recordings.storagePath}`);
     console.log(`Recordings retention: ${config.recordings.retentionDays} days`);
 

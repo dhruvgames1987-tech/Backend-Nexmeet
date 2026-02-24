@@ -43,10 +43,10 @@ app.use('/recordings', express_1.default.static(config_1.config.recordings.stora
 // ==========================================
 // RATE LIMITING - Protect against brute force
 // ==========================================
-// Global rate limit: 100 requests per 15 minutes per IP
+// Global rate limit: 5000 requests per 15 minutes per IP (to accommodate app polling)
 const globalLimiter = (0, express_rate_limit_1.default)({
     windowMs: 15 * 60 * 1000,
-    max: 100,
+    max: 5000,
     message: { error: 'Too many requests, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
@@ -97,6 +97,8 @@ app.post('/start-session-recording', recordingsController_1.startSessionRecordin
 app.post('/stop-session-recording', recordingsController_1.stopSessionRecording);
 app.get('/session-recordings', recordingsController_1.getSessionRecordings);
 // Recording routes - User clips
+app.post('/start-user-clip-recording', recordingsController_1.startUserClipRecording);
+app.post('/stop-user-clip-recording', recordingsController_1.stopUserClipRecording);
 app.post('/upload-clip', upload.single('audio'), recordingsController_1.uploadUserClip);
 app.get('/user-recordings', recordingsController_1.getUserRecordings);
 app.get('/my-recordings', recordingsController_1.getMyRecordings);
@@ -117,7 +119,7 @@ app.post('/trigger-cleanup', (req, res) => __awaiter(void 0, void 0, void 0, fun
 // ==========================================
 app.listen(config_1.config.port, () => {
     console.log(`Server running on port ${config_1.config.port}`);
-    console.log('Rate limiting enabled: 100 req/15min global, 30 login attempts/5min');
+    console.log('Rate limiting enabled: 5000 req/15min global, 30 login attempts/5min');
     console.log(`Recordings storage: ${config_1.config.recordings.storagePath}`);
     console.log(`Recordings retention: ${config_1.config.recordings.retentionDays} days`);
     // Initialize cleanup job
