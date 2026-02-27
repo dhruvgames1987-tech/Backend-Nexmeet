@@ -4,18 +4,79 @@ import path from 'path';
 import { config } from '../config';
 import { supabase } from '../supabaseClient';
 
+// How long (in hours) before a 'recording' status is considered stale
+const STALE_RECORDING_HOURS = 2;
+
 /**
  * Cleanup job that runs daily to delete recordings older than retention period
- * Deletes both files from filesystem and metadata from database
+ * Deletes both files from filesystem and metadata from database.
+ * Also marks stale recordings (stuck in 'recording' status) as 'failed'.
  */
 export const initCleanupJob = () => {
     // Run every day at 2:00 AM
     cron.schedule('0 2 * * *', async () => {
         console.log('[Cleanup] Starting recording cleanup job...');
+        await cleanupStaleRecordings();
         await cleanupOldRecordings();
     });
 
+    // Also run stale recording cleanup on server startup (delayed by 30s)
+    setTimeout(async () => {
+        console.log('[Cleanup] Running startup stale recording cleanup...');
+        await cleanupStaleRecordings();
+    }, 30000);
+
     console.log(`[Cleanup] Scheduled daily cleanup for recordings older than ${config.recordings.retentionDays} days`);
+};
+
+/**
+ * Mark recordings stuck in 'recording' status for too long as 'failed'.
+ * This catches cases where:
+ * - The egress failed silently
+ * - The stop recording request was never sent
+ * - The webhook never fired
+ */
+export const cleanupStaleRecordings = async () => {
+    try {
+        const cutoffTime = new Date();
+        cutoffTime.setHours(cutoffTime.getHours() - STALE_RECORDING_HOURS);
+
+        const { data: staleRecordings, error: fetchError } = await supabase
+            .from('recordings')
+            .select('id, egress_id, room_name, started_at')
+            .eq('status', 'recording')
+            .lt('started_at', cutoffTime.toISOString());
+
+        if (fetchError) {
+            console.error('[Cleanup] Error fetching stale recordings:', fetchError);
+            return;
+        }
+
+        if (!staleRecordings || staleRecordings.length === 0) {
+            console.log('[Cleanup] No stale recordings found');
+            return;
+        }
+
+        console.log(`[Cleanup] Found ${staleRecordings.length} stale recording(s) stuck in 'recording' status`);
+
+        for (const rec of staleRecordings) {
+            const { error: updateError } = await supabase
+                .from('recordings')
+                .update({
+                    status: 'failed',
+                    ended_at: new Date().toISOString(),
+                })
+                .eq('id', rec.id);
+
+            if (updateError) {
+                console.error(`[Cleanup] Error marking recording ${rec.id} as failed:`, updateError);
+            } else {
+                console.log(`[Cleanup] Marked stale recording ${rec.id} (room: ${rec.room_name}, started: ${rec.started_at}) as failed`);
+            }
+        }
+    } catch (err) {
+        console.error('[Cleanup] Unexpected error during stale recording cleanup:', err);
+    }
 };
 
 export const cleanupOldRecordings = async () => {
@@ -79,8 +140,9 @@ export const cleanupOldRecordings = async () => {
     }
 };
 
-// Manual trigger for testing
+// Manual trigger for testing (runs both stale + expired cleanups)
 export const triggerCleanup = async () => {
     console.log('[Cleanup] Manual cleanup triggered');
+    await cleanupStaleRecordings();
     await cleanupOldRecordings();
 };

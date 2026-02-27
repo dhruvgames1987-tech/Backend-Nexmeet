@@ -45,7 +45,21 @@ const upload = multer({
 // ==========================================
 // STATIC FILE SERVING FOR RECORDINGS
 // ==========================================
-app.use('/recordings', express.static(config.recordings.storagePath));
+// Serve recording files - uses /recording-files/ prefix to avoid
+// route conflict with the /recordings API endpoint
+app.use('/recording-files', express.static(config.recordings.storagePath));
+
+// Also keep the old /recordings static path for backward compat
+// (mobile app may reference /recordings/sessions/... or /recordings/clips/...)
+// This ONLY serves actual files with extensions, not the API path
+app.use('/recordings', (req, res, next) => {
+    // If this looks like an API request (no file extension), skip to the API route
+    const hasFileExtension = /\.[a-zA-Z0-9]+$/.test(req.path);
+    if (!hasFileExtension) {
+        return next();
+    }
+    express.static(config.recordings.storagePath)(req, res, next);
+});
 
 // ==========================================
 // RATE LIMITING - Protect against brute force
@@ -122,6 +136,10 @@ app.get('/user-recordings', getUserRecordings);
 app.get('/my-recordings', getMyRecordings);
 
 // Recording routes - All recordings
+// Primary API endpoint (recommended)
+app.get('/api/recordings', getRecordings);
+// Legacy route (backward compat - works because static middleware
+// above skips requests without file extensions)
 app.get('/recordings', getRecordings);
 
 // Legacy recording routes (backwards compatibility)
