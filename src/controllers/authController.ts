@@ -209,11 +209,19 @@ export const logout = async (req: Request, res: Response) => {
 
 export const getOnlineUsers = async (req: Request, res: Response) => {
     try {
-        const { data: users, error } = await supabase
+        let query = supabase
             .from('users')
-            .select('id, username, full_name, status, is_online, device_id, role, current_room_id')
+            .select('id, username, full_name, status, is_online, device_id, role, current_room_id, created_by')
             .eq('is_online', true)
             .order('username', { ascending: true });
+
+        // If admin_id is provided, filter to only users created by that admin
+        const adminId = req.query.admin_id as string | undefined;
+        if (adminId) {
+            query = query.eq('created_by', adminId);
+        }
+
+        const { data: users, error } = await query;
 
         if (error) {
             throw error;
