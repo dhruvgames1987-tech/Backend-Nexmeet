@@ -47,6 +47,7 @@ ensureRecordingsDir();
 /**
  * Start recording an entire room session (Admin only)
  * Uses LiveKit Egress for server-side composite recording
+ * Includes duplicate prevention: stops any existing active recording first
  */
 export const startSessionRecording = async (req: Request, res: Response) => {
     const { roomName, username } = req.body;
@@ -56,6 +57,32 @@ export const startSessionRecording = async (req: Request, res: Response) => {
     }
 
     try {
+        // Duplicate prevention: stop any existing active recording for this room by this admin
+        const { data: existingRecordings } = await supabase
+            .from('recordings')
+            .select('egress_id')
+            .eq('room_name', roomName)
+            .eq('created_by', username)
+            .eq('status', 'recording')
+            .eq('recording_type', 'admin_session');
+
+        if (existingRecordings && existingRecordings.length > 0) {
+            console.log(`Found ${existingRecordings.length} existing active recording(s) for room=${roomName}, stopping them first`);
+            for (const rec of existingRecordings) {
+                try {
+                    await egressClient.stopEgress(rec.egress_id);
+                    console.log(`Stopped orphan egress: ${rec.egress_id}`);
+                } catch (stopErr) {
+                    console.log(`Could not stop egress ${rec.egress_id} (may have already ended)`);
+                }
+                // Mark as completed regardless
+                await supabase
+                    .from('recordings')
+                    .update({ status: 'completed', ended_at: new Date().toISOString() })
+                    .eq('egress_id', rec.egress_id);
+            }
+        }
+
         // Calculate expiration date
         const expiresAt = new Date();
         expiresAt.setDate(expiresAt.getDate() + config.recordings.retentionDays);
@@ -110,6 +137,7 @@ export const startSessionRecording = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to start session recording' });
     }
 };
+
 
 /**
  * Start recording a user clip (all voices in room) using LiveKit Egress
@@ -559,3 +587,67 @@ export const egressWebhook = async (req: Request, res: Response) => {
 
     return res.json({ received: true });
 };
+
+/**
+ * Cleanup orphan recordings that are stuck in 'recording' status
+ * This handles cases where the mobile app crashes or loses connectivity
+ * Runs on startup and every 30 minutes
+ */
+export const cleanupOrphanRecordings = async () => {
+    try {
+        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+
+        const { data: staleRecordings } = await supabase
+            .from('recordings')
+            .select('id, egress_id, started_at, room_name, created_by')
+            .eq('status', 'recording')
+            .lt('started_at', thirtyMinutesAgo);
+
+        if (!staleRecordings || staleRecordings.length === 0) {
+            return;
+        }
+
+        console.log(`[Cleanup] Found ${staleRecordings.length} stale recording(s) older than 30 minutes`);
+
+        for (const rec of staleRecordings) {
+            try {
+                // Try to stop the egress gracefully
+                await egressClient.stopEgress(rec.egress_id);
+                console.log(`[Cleanup] Stopped stale egress: ${rec.egress_id} (room=${rec.room_name}, by=${rec.created_by})`);
+
+                const endedAt = new Date();
+                const startedAt = new Date(rec.started_at);
+                const duration = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
+
+                await supabase
+                    .from('recordings')
+                    .update({
+                        status: 'completed',
+                        ended_at: endedAt.toISOString(),
+                        duration: duration,
+                    })
+                    .eq('id', rec.id);
+            } catch (stopErr) {
+                // Egress already ended or doesn't exist — mark as failed
+                console.log(`[Cleanup] Egress ${rec.egress_id} not found, marking as failed`);
+                await supabase
+                    .from('recordings')
+                    .update({
+                        status: 'failed',
+                        ended_at: new Date().toISOString(),
+                    })
+                    .eq('id', rec.id);
+            }
+        }
+
+        console.log(`[Cleanup] Finished processing ${staleRecordings.length} stale recording(s)`);
+    } catch (err) {
+        console.error('[Cleanup] Error during orphan recording cleanup:', err);
+    }
+};
+
+// Run cleanup on module load (backend startup)
+cleanupOrphanRecordings();
+
+// Run cleanup every 30 minutes
+setInterval(cleanupOrphanRecordings, 30 * 60 * 1000);
