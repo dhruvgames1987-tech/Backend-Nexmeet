@@ -93,8 +93,37 @@ export const login = async (req: Request, res: Response) => {
 
         // 5. Generate Token based on user's assigned room
         let roomName = 'General Assembly'; // Default fallback if no room assigned
+        let resolvedRoomId = user.current_room_id;
 
-        if (user.current_room_id) {
+        // For admins, prioritize joining the room THEY created over the room they were assigned
+        if (user.role === 'admin' || user.role === 'super_admin') {
+            const { data: ownRoom, error: ownRoomError } = await supabase
+                .from('rooms')
+                .select('id, name')
+                .eq('created_by', user.id)
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            if (ownRoom && !ownRoomError) {
+                roomName = ownRoom.name;
+                resolvedRoomId = ownRoom.id;
+                console.log(`Admin ${username} joining their own created room: ${roomName} (ID: ${ownRoom.id})`);
+            } else if (user.current_room_id) {
+                // Fallback to assigned room
+                const { data: room, error: roomError } = await supabase
+                    .from('rooms')
+                    .select('name')
+                    .eq('id', user.current_room_id)
+                    .single();
+
+                if (room && !roomError) {
+                    roomName = room.name;
+                    console.log(`Admin ${username} joining assigned room: ${roomName} (ID: ${user.current_room_id})`);
+                }
+            }
+        } else if (user.current_room_id) {
+            // For regular users, always use their assigned room
             const { data: room, error: roomError } = await supabase
                 .from('rooms')
                 .select('name')
@@ -110,6 +139,7 @@ export const login = async (req: Request, res: Response) => {
         } else {
             console.log(`No room assigned to user ${username}, using default room`);
         }
+
 
         const token = await createLiveKitToken(username, roomName);
 
