@@ -6,7 +6,7 @@ import path from 'path';
 import { config } from './config';
 
 import { login, changePassword, logout, getOnlineUsers } from './controllers/authController';
-import { generateToken, muteAllParticipants, unmuteAllParticipants, logoutAllParticipants, logoutUser } from './controllers/roomController';
+import { generateToken, muteAllParticipants, unmuteAllParticipants, logoutAllParticipants, logoutUser, startPrivateVoice, stopPrivateVoice } from './controllers/roomController';
 import {
     startSessionRecording,
     stopSessionRecording,
@@ -122,6 +122,8 @@ app.post('/mute-all', muteAllParticipants);
 app.post('/unmute-all', unmuteAllParticipants);
 app.post('/logout-all', logoutAllParticipants);
 app.post('/logout-user', logoutUser);
+app.post('/private-voice/start', startPrivateVoice);
+app.post('/private-voice/stop', stopPrivateVoice);
 
 // Recording routes - Session recordings (Admin)
 app.post('/start-session-recording', startSessionRecording);
