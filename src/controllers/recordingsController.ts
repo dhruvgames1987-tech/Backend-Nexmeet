@@ -28,6 +28,46 @@ const egressClient = new EgressClient(
     config.livekit.apiSecret
 );
 
+// EgressStatus enum (livekit-server-sdk@1.2.7, numeric):
+// 0 STARTING, 1 ACTIVE, 2 ENDING, 3 COMPLETE, 4 FAILED, 5 ABORTED
+const EGRESS_ACTIVE = 1;
+const EGRESS_TERMINAL = [3, 4, 5];
+
+/**
+ * Wait until the Egress is actually capturing (status ACTIVE) before we let
+ * the client unmute the mic. startRoomCompositeEgress returns as soon as the
+ * job is accepted (status STARTING) — the compositor needs another ~1-3s to
+ * begin recording, and any audio spoken before that is lost. Polling here
+ * makes the client's "recording started" signal truthful.
+ */
+const waitForEgressActive = async (
+    roomName: string,
+    egressId: string | undefined,
+    timeoutMs = 12000,
+    intervalMs = 300
+): Promise<boolean> => {
+    if (!egressId) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        try {
+            const list = await egressClient.listEgress(roomName);
+            const info = list.find(e => e.egressId === egressId);
+            if (info) {
+                if (info.status === EGRESS_ACTIVE) return true;
+                if (info.status !== undefined && EGRESS_TERMINAL.includes(info.status)) {
+                    console.warn(`Egress ${egressId} reached terminal status ${info.status} before active`);
+                    return false;
+                }
+            }
+        } catch (err) {
+            console.warn(`waitForEgressActive poll error for ${egressId}:`, err);
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+    }
+    console.warn(`Egress ${egressId} not ACTIVE within ${timeoutMs}ms — proceeding anyway`);
+    return false;
+};
+
 // Ensure recordings directory exists
 const ensureRecordingsDir = () => {
     const recordingsPath = config.recordings.storagePath;
@@ -104,6 +144,10 @@ export const startSessionRecording = async (req: Request, res: Response) => {
             }
         );
 
+        // Block until Egress is actually recording so the client only goes
+        // live (unmutes the mic) once audio is being captured.
+        await waitForEgressActive(roomName, egressInfo.egressId);
+
         // The URL that the backend will serve this file at
         const fileUrl = `/recordings/sessions/${filename}`;
 
@@ -177,6 +221,10 @@ export const startUserClipRecording = async (req: Request, res: Response) => {
                 audioOnly: true,
             }
         );
+
+        // Block until Egress is actually recording so the client only goes
+        // live (unmutes the mic) once audio is being captured.
+        await waitForEgressActive(roomName, egressInfo.egressId);
 
         const fileUrl = `/recordings/clips/${filename}`;
 
