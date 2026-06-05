@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { EgressClient, EncodedFileOutput, EncodedFileType, DirectFileOutput } from 'livekit-server-sdk';
+import { EgressClient } from 'livekit-server-sdk';
 import { config } from '../config';
 import { supabase } from '../supabaseClient';
 import fs from 'fs';
@@ -28,46 +28,6 @@ const egressClient = new EgressClient(
     config.livekit.apiSecret
 );
 
-// EgressStatus enum (livekit-server-sdk@1.2.7, numeric):
-// 0 STARTING, 1 ACTIVE, 2 ENDING, 3 COMPLETE, 4 FAILED, 5 ABORTED
-const EGRESS_ACTIVE = 1;
-const EGRESS_TERMINAL = [3, 4, 5];
-
-/**
- * Wait until the Egress is actually capturing (status ACTIVE) before we let
- * the client unmute the mic. startRoomCompositeEgress returns as soon as the
- * job is accepted (status STARTING) — the compositor needs another ~1-3s to
- * begin recording, and any audio spoken before that is lost. Polling here
- * makes the client's "recording started" signal truthful.
- */
-const waitForEgressActive = async (
-    roomName: string,
-    egressId: string | undefined,
-    timeoutMs = 12000,
-    intervalMs = 300
-): Promise<boolean> => {
-    if (!egressId) return false;
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-        try {
-            const list = await egressClient.listEgress(roomName);
-            const info = list.find(e => e.egressId === egressId);
-            if (info) {
-                if (info.status === EGRESS_ACTIVE) return true;
-                if (info.status !== undefined && EGRESS_TERMINAL.includes(info.status)) {
-                    console.warn(`Egress ${egressId} reached terminal status ${info.status} before active`);
-                    return false;
-                }
-            }
-        } catch (err) {
-            console.warn(`waitForEgressActive poll error for ${egressId}:`, err);
-        }
-        await new Promise(r => setTimeout(r, intervalMs));
-    }
-    console.warn(`Egress ${egressId} not ACTIVE within ${timeoutMs}ms — proceeding anyway`);
-    return false;
-};
-
 // Ensure recordings directory exists
 const ensureRecordingsDir = () => {
     const recordingsPath = config.recordings.storagePath;
@@ -83,308 +43,6 @@ const ensureRecordingsDir = () => {
 
 // Initialize directory on module load
 ensureRecordingsDir();
-
-/**
- * Start recording an entire room session (Admin only)
- * Uses LiveKit Egress for server-side composite recording
- * Includes duplicate prevention: stops any existing active recording first
- */
-export const startSessionRecording = async (req: Request, res: Response) => {
-    const { roomName, username } = req.body;
-
-    if (!roomName) {
-        return res.status(400).json({ error: 'Room name is required' });
-    }
-
-    try {
-        // Duplicate prevention: stop any existing active recording for this room by this admin
-        const { data: existingRecordings } = await supabase
-            .from('recordings')
-            .select('egress_id')
-            .eq('room_name', roomName)
-            .eq('created_by', username)
-            .eq('status', 'recording')
-            .eq('recording_type', 'admin_session');
-
-        if (existingRecordings && existingRecordings.length > 0) {
-            console.log(`Found ${existingRecordings.length} existing active recording(s) for room=${roomName}, stopping them first`);
-            for (const rec of existingRecordings) {
-                try {
-                    await egressClient.stopEgress(rec.egress_id);
-                    console.log(`Stopped orphan egress: ${rec.egress_id}`);
-                } catch (stopErr) {
-                    console.log(`Could not stop egress ${rec.egress_id} (may have already ended)`);
-                }
-                // Mark as completed regardless
-                await supabase
-                    .from('recordings')
-                    .update({ status: 'completed', ended_at: new Date().toISOString() })
-                    .eq('egress_id', rec.egress_id);
-            }
-        }
-
-        // Calculate expiration date
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + config.recordings.retentionDays);
-
-        const timestamp = Date.now();
-        const filename = `session_${roomName}_${timestamp}.ogg`;
-
-        // Egress saves to this path inside the egress container.
-        // This path should be a Docker volume shared with the backend container
-        // so it maps to /app/recordings/sessions/<filename> on the backend
-        const egressFilePath = `/recordings/sessions/${filename}`;
-
-        // Start room composite egress (records all audio in room)
-        const egressInfo = await egressClient.startRoomCompositeEgress(
-            roomName,
-            { file: { fileType: EncodedFileType.OGG, filepath: egressFilePath } },
-            {
-                audioOnly: true,
-            }
-        );
-
-        // Block until Egress is actually recording so the client only goes
-        // live (unmutes the mic) once audio is being captured.
-        await waitForEgressActive(roomName, egressInfo.egressId);
-
-        // The URL that the backend will serve this file at
-        const fileUrl = `/recordings/sessions/${filename}`;
-
-        // Save to database - include the expected file_url immediately
-        const { data, error } = await supabase
-            .from('recordings')
-            .insert({
-                room_name: roomName,
-                egress_id: egressInfo.egressId,
-                file_url: fileUrl,
-                status: 'recording',
-                recording_type: 'admin_session',
-                created_by: username,
-                started_at: new Date().toISOString(),
-                expires_at: expiresAt.toISOString(),
-            })
-            .select()
-            .single();
-
-        if (error) throw error;
-
-        console.log(`Recording started: egress=${egressInfo.egressId}, file=${egressFilePath}`);
-
-        return res.json({
-            message: 'Session recording started',
-            egressId: egressInfo.egressId,
-            recording: data
-        });
-    } catch (err) {
-        console.error('Start session recording error:', err);
-        return res.status(500).json({ error: 'Failed to start session recording' });
-    }
-};
-
-
-/**
- * Start recording a user clip (all voices in room) using LiveKit Egress
- * Called when a user presses and holds the mic button
- */
-export const startUserClipRecording = async (req: Request, res: Response) => {
-    const { roomName, username } = req.body;
-
-    if (!roomName || !username) {
-        return res.status(400).json({ error: 'Room name and username are required' });
-    }
-
-    try {
-        // Get user ID from username
-        const { data: userData, error: userError } = await supabase
-            .from('users')
-            .select('id')
-            .eq('username', username)
-            .single();
-
-        if (userError || !userData) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + config.recordings.retentionDays);
-
-        const timestamp = Date.now();
-        const filename = `clip_${username}_${timestamp}.ogg`;
-        const egressFilePath = `/recordings/clips/${filename}`;
-
-        // Start room composite egress (records ALL audio in room)
-        const egressInfo = await egressClient.startRoomCompositeEgress(
-            roomName,
-            { file: { fileType: EncodedFileType.OGG, filepath: egressFilePath } },
-            {
-                audioOnly: true,
-            }
-        );
-
-        // Block until Egress is actually recording so the client only goes
-        // live (unmutes the mic) once audio is being captured.
-        await waitForEgressActive(roomName, egressInfo.egressId);
-
-        const fileUrl = `/recordings/clips/${filename}`;
-
-        // Save to database as user_clip with user_id
-        const { data, error } = await supabase
-            .from('recordings')
-            .insert({
-                room_name: roomName,
-                egress_id: egressInfo.egressId,
-                file_url: fileUrl,
-                status: 'recording',
-                recording_type: 'user_clip',
-                user_id: userData.id,
-                created_by: username,
-                started_at: new Date().toISOString(),
-                expires_at: expiresAt.toISOString(),
-            })
-            .select()
-            .single();
-
-        if (error) throw error;
-
-        console.log(`User clip recording started: user=${username}, egress=${egressInfo.egressId}`);
-
-        return res.json({
-            message: 'User clip recording started',
-            egressId: egressInfo.egressId,
-            recording: data
-        });
-    } catch (err) {
-        console.error('Start user clip recording error:', err);
-        return res.status(500).json({ error: 'Failed to start user clip recording' });
-    }
-};
-
-/**
- * Stop a user clip recording
- */
-export const stopUserClipRecording = async (req: Request, res: Response) => {
-    const { egressId } = req.body;
-
-    if (!egressId) {
-        return res.status(400).json({ error: 'Egress ID is required' });
-    }
-
-    try {
-        const egressInfo = await egressClient.stopEgress(egressId);
-
-        const { data: existingRecording } = await supabase
-            .from('recordings')
-            .select('started_at, file_url')
-            .eq('egress_id', egressId)
-            .single();
-
-        const endedAt = new Date();
-        let duration = 0;
-
-        if (existingRecording?.started_at) {
-            const startedAt = new Date(existingRecording.started_at);
-            duration = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
-        }
-
-        let fileUrl = existingRecording?.file_url || null;
-        try {
-            const fileResults = (egressInfo as any)?.fileResults || (egressInfo as any)?.file?.filename;
-            if (fileResults) {
-                const egressFilename = typeof fileResults === 'string'
-                    ? path.basename(fileResults)
-                    : path.basename(fileResults[0]?.filename || '');
-                if (egressFilename) {
-                    fileUrl = `/recordings/clips/${egressFilename}`;
-                }
-            }
-        } catch (e) {
-            console.log('Could not extract filename from egress info, using pre-saved URL');
-        }
-
-        await supabase
-            .from('recordings')
-            .update({
-                status: 'completed',
-                ended_at: endedAt.toISOString(),
-                duration: duration,
-                file_url: fileUrl,
-            })
-            .eq('egress_id', egressId);
-
-        console.log(`User clip recording stopped: egress=${egressId}, duration=${duration}s`);
-
-        return res.json({ message: 'User clip recording stopped', duration, fileUrl, egressInfo });
-    } catch (err) {
-        console.error('Stop user clip recording error:', err);
-        return res.status(500).json({ error: 'Failed to stop user clip recording' });
-    }
-};
-
-/**
- * Stop a session recording
- */
-export const stopSessionRecording = async (req: Request, res: Response) => {
-    const { egressId } = req.body;
-
-    if (!egressId) {
-        return res.status(400).json({ error: 'Egress ID is required' });
-    }
-
-    try {
-        const egressInfo = await egressClient.stopEgress(egressId);
-
-        // First, get the recording to calculate duration and file info
-        const { data: existingRecording } = await supabase
-            .from('recordings')
-            .select('started_at, room_name, file_url')
-            .eq('egress_id', egressId)
-            .single();
-
-        const endedAt = new Date();
-        let duration = 0;
-
-        if (existingRecording?.started_at) {
-            const startedAt = new Date(existingRecording.started_at);
-            duration = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
-        }
-
-        // Try to get the file URL from the egress response
-        let fileUrl = existingRecording?.file_url || null;
-        try {
-            // The egress info contains file results after stopping
-            const fileResults = (egressInfo as any)?.fileResults || (egressInfo as any)?.file?.filename;
-            if (fileResults) {
-                const egressFilename = typeof fileResults === 'string'
-                    ? path.basename(fileResults)
-                    : path.basename(fileResults[0]?.filename || '');
-                if (egressFilename) {
-                    fileUrl = `/recordings/sessions/${egressFilename}`;
-                }
-            }
-        } catch (e) {
-            console.log('Could not extract filename from egress info, using pre-saved URL');
-        }
-
-        // Update database with duration and file URL
-        await supabase
-            .from('recordings')
-            .update({
-                status: 'completed',
-                ended_at: endedAt.toISOString(),
-                duration: duration,
-                file_url: fileUrl,
-            })
-            .eq('egress_id', egressId);
-
-        console.log(`Recording stopped: egress=${egressId}, duration=${duration}s, file_url=${fileUrl}`);
-
-        return res.json({ message: 'Session recording stopped', duration, fileUrl, egressInfo });
-    } catch (err) {
-        console.error('Stop session recording error:', err);
-        return res.status(500).json({ error: 'Failed to stop session recording' });
-    }
-};
 
 /**
  * Upload a user audio clip (from mobile app client-side recording)
@@ -549,6 +207,8 @@ export const getMyRecordings = async (req: Request, res: Response) => {
             .select('*')
             .eq('created_by', username)
             .in('status', ['completed', 'recording'])
+            // Hide the continuous parent recording — users only see sliced clips.
+            .neq('recording_type', 'continuous_session')
             .order('started_at', { ascending: false });
 
         if (roomName) {
@@ -577,6 +237,8 @@ export const getRecordings = async (req: Request, res: Response) => {
             .from('recordings')
             .select('*')
             .eq('status', 'completed')
+            // Hide the continuous parent recording — only sliced clips are listed.
+            .neq('recording_type', 'continuous_session')
             .order('started_at', { ascending: false });
 
         if (roomName) {
@@ -597,16 +259,6 @@ export const getRecordings = async (req: Request, res: Response) => {
         return res.status(500).json({ error: 'Failed to fetch recordings' });
     }
 };
-
-/**
- * Legacy: Start recording (keeping for backwards compatibility)
- */
-export const startRecording = startSessionRecording;
-
-/**
- * Legacy: Stop recording (keeping for backwards compatibility)
- */
-export const stopRecording = stopSessionRecording;
 
 /**
  * Webhook handler for LiveKit egress events

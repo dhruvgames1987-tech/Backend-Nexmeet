@@ -8,20 +8,18 @@ import { config } from './config';
 import { login, changePassword, logout, getOnlineUsers } from './controllers/authController';
 import { generateToken, muteAllParticipants, unmuteAllParticipants, logoutAllParticipants, logoutUser, startPrivateVoice, stopPrivateVoice } from './controllers/roomController';
 import {
-    startSessionRecording,
-    stopSessionRecording,
-    startUserClipRecording,
-    stopUserClipRecording,
     uploadUserClip,
     getUserRecordings,
     getSessionRecordings,
     getMyRecordings,
     getRecordings,
     egressWebhook,
-    // Legacy aliases
-    startRecording,
-    stopRecording
 } from './controllers/recordingsController';
+import {
+    startContinuousRecording,
+    stopContinuousRecording,
+    markClip,
+} from './controllers/continuousRecordingController';
 import { initCleanupJob, triggerCleanup } from './utils/cleanupJob';
 
 const app = express();
@@ -125,28 +123,22 @@ app.post('/logout-user', logoutUser);
 app.post('/private-voice/start', startPrivateVoice);
 app.post('/private-voice/stop', stopPrivateVoice);
 
-// Recording routes - Session recordings (Admin)
-app.post('/start-session-recording', startSessionRecording);
-app.post('/stop-session-recording', stopSessionRecording);
-app.get('/session-recordings', getSessionRecordings);
+// Recording routes - Continuous room recording (instant push-to-talk).
+// One Egress per room runs for the whole session; each press is sliced into a
+// clip by a background job. This replaces the old per-press Egress endpoints.
+app.post('/continuous-recording/start', startContinuousRecording);
+app.post('/continuous-recording/stop', stopContinuousRecording);
+app.post('/continuous-recording/mark', markClip);
 
-// Recording routes - User clips
-app.post('/start-user-clip-recording', startUserClipRecording);
-app.post('/stop-user-clip-recording', stopUserClipRecording);
+// Recording listing + client-side clip upload
 app.post('/upload-clip', upload.single('audio'), uploadUserClip);
+app.get('/session-recordings', getSessionRecordings);
 app.get('/user-recordings', getUserRecordings);
 app.get('/my-recordings', getMyRecordings);
-
-// Recording routes - All recordings
-// Primary API endpoint (recommended)
 app.get('/api/recordings', getRecordings);
 // Legacy route (backward compat - works because static middleware
 // above skips requests without file extensions)
 app.get('/recordings', getRecordings);
-
-// Legacy recording routes (backwards compatibility)
-app.post('/start-recording', startRecording);
-app.post('/stop-recording', stopRecording);
 
 // Webhook for LiveKit Egress events
 app.post('/webhook/egress', egressWebhook);

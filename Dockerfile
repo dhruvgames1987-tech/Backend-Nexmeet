@@ -1,6 +1,11 @@
 # Use official Node.js LTS image
 FROM node:18-alpine
 
+# ffmpeg is required for server-side clip slicing (stream-copy trim of the
+# continuous room recording). The alpine package is musl-built, so no glibc
+# compatibility issues with prebuilt binaries.
+RUN apk add --no-cache ffmpeg
+
 # Set working directory
 WORKDIR /app
 
