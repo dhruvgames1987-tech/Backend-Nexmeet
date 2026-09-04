@@ -19,6 +19,7 @@ import {
   logoutUser,
   startPrivateVoice,
   stopPrivateVoice,
+  reapplyPrivateVoice,
 } from "./controllers/roomController";
 import {
   uploadUserClip,
@@ -137,6 +138,9 @@ app.post("/logout-all", logoutAllParticipants);
 app.post("/logout-user", logoutUser);
 app.post("/private-voice/start", startPrivateVoice);
 app.post("/private-voice/stop", stopPrivateVoice);
+// Idempotent: admin client POSTs this whenever a user joins mid-1-1 so the
+// newcomer inherits canSubscribe:false. No-op if the room has no active state.
+app.post("/private-voice/reapply", reapplyPrivateVoice);
 
 // Recording routes - Continuous room recording (instant push-to-talk).
 // One Egress per room runs for the whole session; each press is sliced into a
