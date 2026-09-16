@@ -351,3 +351,90 @@ cleanupOrphanRecordings();
 
 // Run cleanup every 30 minutes
 setInterval(cleanupOrphanRecordings, 30 * 60 * 1000);
+
+/**
+ * Hard-delete a recording: unlink the file on disk AND remove the DB row.
+ *
+ * Auth:
+ *   - Anyone can delete a recording they created (`row.created_by === username`).
+ *   - `admin_session` recordings are considered admin-owned; if the caller is
+ *     the admin who created them (matches `created_by`) they can delete.
+ *   - Otherwise 403. Users cannot delete other users' clips.
+ *
+ * Body: { username: string }
+ * Route param: :id — the Supabase `recordings.id` (uuid).
+ */
+export const deleteRecording = async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { username } = req.body || {};
+
+    if (!id) return res.status(400).json({ error: 'recording id is required' });
+    if (!username) return res.status(400).json({ error: 'username is required' });
+
+    try {
+        // 1. Fetch row
+        const { data: row, error: fetchErr } = await supabase
+            .from('recordings')
+            .select('*')
+            .eq('id', id)
+            .maybeSingle();
+
+        if (fetchErr) throw fetchErr;
+        if (!row) return res.status(404).json({ error: 'recording not found' });
+
+        // 2. Ownership check. `created_by` is the identity that owns the row;
+        //    a user can only delete their own clips, and an admin can only
+        //    delete admin_session rows they themselves created.
+        if (row.created_by !== username) {
+            console.warn(
+                `[deleteRecording] 403 for id=${id}: created_by=${row.created_by} != username=${username}`,
+            );
+            return res.status(403).json({ error: 'not the owner of this recording' });
+        }
+
+        // 3. Resolve on-disk path from stored file_url. `file_url` is stored
+        //    as `/recordings/<subdir>/<filename>`; storagePath already points
+        //    at the parent directory (e.g. `/app/recordings`), so strip the
+        //    `/recordings` prefix and join.
+        //    Fallback: if the URL is absolute (starts with http), we can't
+        //    delete the file (was uploaded to external storage), but we still
+        //    drop the DB row.
+        let unlinked = false;
+        let unlinkPath: string | null = null;
+        if (row.file_url && typeof row.file_url === 'string' && !row.file_url.startsWith('http')) {
+            // Strip a leading `/recordings/` if present; join to storagePath.
+            const rel = row.file_url.replace(/^\/?recordings\//, '');
+            unlinkPath = path.join(config.recordings.storagePath, rel);
+            try {
+                await fs.promises.unlink(unlinkPath);
+                unlinked = true;
+                console.log(`[deleteRecording] unlinked ${unlinkPath}`);
+            } catch (fsErr: any) {
+                // ENOENT = file already gone; treat as success. Anything else
+                // we log but still proceed with the DB delete so the row
+                // doesn't linger as an unusable ghost.
+                if (fsErr?.code === 'ENOENT') {
+                    console.log(`[deleteRecording] file already gone: ${unlinkPath}`);
+                } else {
+                    console.error(`[deleteRecording] unlink failed for ${unlinkPath}:`, fsErr);
+                }
+            }
+        }
+
+        // 4. Delete the DB row.
+        const { error: delErr } = await supabase.from('recordings').delete().eq('id', id);
+        if (delErr) throw delErr;
+
+        return res.json({
+            ok: true,
+            id,
+            unlinked,
+            path: unlinkPath,
+        });
+    } catch (err) {
+        console.error('[deleteRecording] error:', err);
+        return res
+            .status(500)
+            .json({ error: 'Failed to delete recording', details: (err as Error).message });
+    }
+};

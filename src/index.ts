@@ -28,6 +28,7 @@ import {
   getMyRecordings,
   getRecordings,
   egressWebhook,
+  deleteRecording,
 } from "./controllers/recordingsController";
 import {
   startContinuousRecording,
@@ -161,6 +162,12 @@ app.get("/recordings", getRecordings);
 
 // Webhook for LiveKit Egress events
 app.post("/webhook/egress", egressWebhook);
+
+// Hard-delete a recording (row + on-disk file). Owner-only:
+// - Users can delete their own `user_clip` rows.
+// - Admin can delete `admin_session` rows they themselves created.
+// Body: { username }. See recordingsController.deleteRecording for auth logic.
+app.delete("/recordings/:id", deleteRecording);
 
 // Manual cleanup trigger (for testing)
 app.post("/trigger-cleanup", async (req, res) => {
